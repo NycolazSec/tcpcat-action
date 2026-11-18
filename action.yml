@@ -25,7 +25,7 @@ inputs:
     required: false
     default: tcpcat.sarif
   upload-sarif:
-    description: Upload the SARIF report to GitHub code scanning (needs "security-events: write").
+    description: 'Upload the SARIF report to GitHub code scanning (needs "security-events: write").'
     required: false
     default: "true"
   fail-on-violation:
