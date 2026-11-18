@@ -1,0 +1,11 @@
+version: 1
+name: tcpcat-action self-test
+zones:
+  runner: [127.0.0.1]
+rules:
+  - name: only 18080 is reachable on the runner
+    from: ci
+    to: runner
+    ports: "18070-18090"
+    allow: [18080/tcp]
+    require: [18081]

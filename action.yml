@@ -1,0 +1,116 @@
+name: tcpcat segmentation check
+description: Check that your network only allows the flows you declared, from this runner, with tcpcat. SARIF results go to code scanning.
+author: NycolazSec
+branding:
+  icon: shield
+  color: blue
+
+inputs:
+  policy:
+    description: Path to a tcpcat segmentation policy (YAML). See https://github.com/NycolazSec/tcpcat#segmentation-testing-as-code
+    required: false
+  from:
+    description: The vantage point this runner stands for; only the policy rules whose "from" matches are checked.
+    required: false
+    default: ci
+  args:
+    description: Arguments for a plain tcpcat scan instead of a policy check, e.g. "-sT -p 22,80,443 example.com". Ignored when "policy" is set.
+    required: false
+  version:
+    description: tcpcat release to use ("latest" or a tag such as "v1.7.0").
+    required: false
+    default: latest
+  sarif:
+    description: Where to write the SARIF report.
+    required: false
+    default: tcpcat.sarif
+  upload-sarif:
+    description: Upload the SARIF report to GitHub code scanning (needs "security-events: write").
+    required: false
+    default: "true"
+  fail-on-violation:
+    description: Fail the step when the policy is violated (exit status 1).
+    required: false
+    default: "true"
+
+outputs:
+  exit-code:
+    description: tcpcat's exit status (0 compliant, 1 violation, 2 usage or configuration error).
+    value: ${{ steps.run.outputs.exit-code }}
+  sarif:
+    description: Path of the SARIF report.
+    value: ${{ inputs.sarif }}
+
+runs:
+  using: composite
+  steps:
+    - name: Install tcpcat
+      shell: bash
+      env:
+        VERSION: ${{ inputs.version }}
+      run: |
+        set -euo pipefail
+        [ "$RUNNER_OS" = "Linux" ] || { echo "::error::tcpcat-action runs on Linux runners only."; exit 2; }
+        case "$RUNNER_ARCH" in
+          X64) arch=amd64 ;;
+          ARM64) arch=arm64 ;;
+          *) echo "::error::unsupported runner architecture: $RUNNER_ARCH"; exit 2 ;;
+        esac
+        if [ "$VERSION" = "latest" ]; then
+          # The latest release's tag, from the redirect of /releases/latest.
+          VERSION="$(curl -fsSLI -o /dev/null -w '%{url_effective}' https://github.com/NycolazSec/tcpcat/releases/latest)"
+          VERSION="${VERSION##*/}"
+        fi
+        base="https://github.com/NycolazSec/tcpcat/releases/download/${VERSION}"
+        archive="tcpcat_${VERSION#v}_linux_${arch}.tar.gz"
+        dir="$RUNNER_TEMP/tcpcat-${VERSION}"
+        mkdir -p "$dir"
+        curl -fsSL -o "$dir/$archive" "$base/$archive"
+        curl -fsSL -o "$dir/checksums.txt" "$base/checksums.txt"
+        # Refuse a binary whose hash is not the one the release published.
+        (cd "$dir" && grep " ${archive}\$" checksums.txt | sha256sum --check --strict)
+        tar -xzf "$dir/$archive" -C "$dir" tcpcat
+        echo "$dir" >> "$GITHUB_PATH"
+        "$dir/tcpcat" --version | head -1
+
+    - name: Run tcpcat
+      id: run
+      shell: bash
+      env:
+        POLICY: ${{ inputs.policy }}
+        FROM: ${{ inputs.from }}
+        ARGS: ${{ inputs.args }}
+        SARIF: ${{ inputs.sarif }}
+      run: |
+        set +e
+        if [ -n "$POLICY" ]; then
+          tcpcat policy check "$POLICY" --from "$FROM" --sarif "$SARIF"
+        elif [ -n "$ARGS" ]; then
+          # shellcheck disable=SC2086 # ARGS is a list of tcpcat options.
+          tcpcat $ARGS --sarif "$SARIF"
+        else
+          echo "::error::set either 'policy' or 'args'."
+          exit 2
+        fi
+        code=$?
+        echo "exit-code=$code" >> "$GITHUB_OUTPUT"
+        exit 0
+
+    - name: Upload SARIF to code scanning
+      if: ${{ inputs.upload-sarif == 'true' && hashFiles(inputs.sarif) != '' }}
+      uses: github/codeql-action/upload-sarif@v4
+      with:
+        sarif_file: ${{ inputs.sarif }}
+        category: tcpcat
+
+    - name: Report the result
+      shell: bash
+      env:
+        CODE: ${{ steps.run.outputs.exit-code }}
+        FAIL: ${{ inputs.fail-on-violation }}
+      run: |
+        case "$CODE" in
+          0) echo "tcpcat: compliant." ;;
+          1) echo "::error::tcpcat: the segmentation policy is violated (see the SARIF report)."; [ "$FAIL" = "true" ] && exit 1 ;;
+          *) echo "::error::tcpcat exited with status $CODE (usage or configuration error)."; exit "$CODE" ;;
+        esac

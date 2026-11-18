@@ -1,0 +1,55 @@
+name: test
+on:
+  push:
+  pull_request:
+  schedule:
+    - cron: "17 6 * * 1"   # weekly, to catch a tcpcat release that breaks the action
+
+permissions:
+  contents: read
+
+jobs:
+  self-test:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, ubuntu-24.04-arm]
+    steps:
+      - uses: actions/checkout@v7
+      - name: Start a listener on 127.0.0.1:18080
+        run: python3 -m http.server 18080 --bind 127.0.0.1 >/dev/null 2>&1 &
+
+      - name: Compliant policy passes
+        id: ok
+        uses: ./
+        with:
+          policy: test/compliant.yaml
+          upload-sarif: "false"
+
+      - name: Violating policy fails
+        id: bad
+        continue-on-error: true
+        uses: ./
+        with:
+          policy: test/violation.yaml
+          sarif: violation.sarif
+          upload-sarif: "false"
+
+      - name: Check the outcomes
+        env:
+          OK_CODE: ${{ steps.ok.outputs.exit-code }}
+          BAD_OUTCOME: ${{ steps.bad.outcome }}
+          BAD_CODE: ${{ steps.bad.outputs.exit-code }}
+        run: |
+          test "$OK_CODE" = 0 || { echo "compliant policy exited $OK_CODE"; exit 1; }
+          test "$BAD_OUTCOME" = failure || { echo "violating policy did not fail the step"; exit 1; }
+          test "$BAD_CODE" = 1 || { echo "violating policy exited $BAD_CODE, want 1"; exit 1; }
+          python3 -c "import json; r=json.load(open('violation.sarif'))['runs'][0]['results']; assert r, 'no SARIF result'; print(r[0]['message']['text'])"
+
+      - name: Plain scan mode
+        uses: ./
+        with:
+          args: "-sT -p 18080 127.0.0.1"
+          sarif: scan.sarif
+          upload-sarif: "false"
